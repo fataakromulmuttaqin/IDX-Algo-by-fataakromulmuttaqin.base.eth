@@ -1,0 +1,114 @@
+//@version=5
+strategy("IDX RSI+VWAP+VOL Strategy — Visible Volume Panel + Dashboard (Fixed)", overlay=true,
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 2,
+     initial_capital  = 10000000, pyramiding = 1)
+
+// ====== INPUTS ======
+rsiLen        = input.int(14, "RSI Length")
+rsiLongLevel  = input.int(58, "RSI Long Level (Buy >)")
+rsiShortLevel = input.int(42, "RSI Short Level (Sell <)")
+rrMultiplier  = input.float(1.8, "R:R Target", step=0.1)
+emaLenHTF     = input.int(50, "EMA(1H) Trend Filter Length")
+sessionFilter = input.bool(true, "Trade only 09:00–15:00 WIB")
+sessionStr    = "0900-1500:1234567"
+
+// --- Volume confirmation ---
+rvolPeriod    = input.int(20, "Relative Volume Period")
+rvolThreshold = input.float(1.2, "Relative Volume Min (x avg)")
+flowFast      = input.int(5, "Capital Inflow Short SMA")
+flowSlow      = input.int(20, "Capital Inflow Long SMA")
+
+// ====== CORE INDICATORS ======
+rsiVal  = ta.rsi(close, rsiLen)
+vwapVal = ta.vwap(hlc3)
+emaHTF  = request.security(syminfo.tickerid, "60", ta.ema(close, emaLenHTF))
+trendUp   = close > emaHTF
+trendDown = close < emaHTF
+
+// ====== VOLUME ANALYTICS ======
+v_sma = ta.sma(volume, rvolPeriod)
+rvol = v_sma == 0 ? 0.0 : volume / v_sma
+moneyFlow = ((close - low) - (high - close)) / (high - low + 1e-9) * volume
+cumFlow   = ta.cum(moneyFlow)
+flowShort = ta.sma(cumFlow, flowFast)
+flowLong  = ta.sma(cumFlow, flowSlow)
+flowDiff  = flowShort - flowLong
+flowTrendUp = flowShort > flowLong
+flowTrendDn = flowShort < flowLong
+volInflow  = (rvol > rvolThreshold) and flowTrendUp
+volOutflow = (rvol > rvolThreshold) and flowTrendDn
+
+// ====== SESSION FILTER (fixed) ======
+inSession = not sessionFilter or (time(timeframe.period, sessionStr) != na)
+bgcolor(inSession ? color.new(color.green,95) : color.new(color.red,97))
+
+// ====== ENTRY LOGIC ======
+longSignal  = ta.crossover(rsiVal, rsiLongLevel) and close > vwapVal and trendUp and inSession and (rvol > rvolThreshold) and flowTrendUp
+shortSignal = ta.crossunder(rsiVal, rsiShortLevel) and close < vwapVal and trendDown and inSession and (rvol > rvolThreshold) and flowTrendDn
+
+// ====== STRATEGY ======
+signalBarLow  = low[1]
+signalBarHigh = high[1]
+eps = syminfo.mintick
+longId  = "Long_RSI_VWAP_VOL"
+shortId = "Short_RSI_VWAP_VOL"
+
+if (longSignal)
+    strategy.entry(longId, strategy.long)
+    stopP = math.min(signalBarLow, open - eps)
+    tp = open + (open - stopP) * rrMultiplier
+    strategy.exit(longId + "_exit", from_entry=longId, stop=stopP, limit=tp)
+
+if (shortSignal)
+    strategy.entry(shortId, strategy.short)
+    stopS = math.max(signalBarHigh, open + eps)
+    tpS = open - (stopS - open) * rrMultiplier
+    strategy.exit(shortId + "_exit", from_entry=shortId, stop=stopS, limit=tpS)
+
+// ====== VISUAL SIGNALS ======
+plot(vwapVal, "VWAP", color=color.orange, linewidth=2)
+plot(emaHTF,  "1H EMA", color=color.new(color.teal, 60))
+plotshape(longSignal,  title="Long",  style=shape.labelup, color=color.new(color.green, 0), text="BUY",  location=location.belowbar)
+plotshape(shortSignal, title="Short", style=shape.labeldown, color=color.new(color.red, 0),   text="SELL", location=location.abovebar)
+
+// ====== VISIBLE VOLUME PANEL (on same chart) ======
+// Scale flowDiff to visually fit under price chart; scale factor chosen conservatively
+scaleFactor = 100000.0
+flowPlot = flowDiff / scaleFactor
+volColor = volInflow ? color.new(color.lime, 0) : volOutflow ? color.new(color.red, 0) : color.new(color.gray, 70)
+plot(flowPlot, title="FlowDiff (scaled)", style=plot.style_columns, color=volColor, transp=40)
+plot(rvol, title="Relative Volume", color=color.new(color.blue, 0), linewidth=1)
+hline(rvolThreshold, "RVOL Threshold", color=color.new(color.gray, 80), linestyle=hline.style_dotted)
+
+// ====== EQUITY LINE ======
+plot(strategy.equity, title="Equity Curve", color=color.new(color.yellow, 0), linewidth=2)
+
+// ====== DASHBOARD ======
+var table dash = table.new(position.top_right, 2, 6, border_color=color.gray, bgcolor=color.new(color.black,85))
+if barstate.islast
+    total = strategy.closedtrades
+    wins  = strategy.wintrades
+    losses= total - wins
+    winr  = total>0 ? (wins/total)*100 : na
+    netP  = strategy.netprofit
+    gp    = strategy.grossprofit
+    gl    = strategy.grossloss
+    pf    = (math.abs(gl) > 0) ? gp / math.abs(gl) : na
+    eq    = strategy.equity
+    table.cell(dash,0,0,"Metric",bgcolor=color.blue,text_color=color.white)
+    table.cell(dash,1,0,"Value",bgcolor=color.blue,text_color=color.white)
+    table.cell(dash,0,1,"Trades",text_color=color.white)
+    table.cell(dash,1,1,str.tostring(total))
+    table.cell(dash,0,2,"Win %",text_color=color.white)
+    table.cell(dash,1,2,total>0?str.tostring(winr,"#.##"):"-")
+    table.cell(dash,0,3,"Profit Factor",text_color=color.white)
+    table.cell(dash,1,3,not na(pf)?str.tostring(pf,"#.##"):"-")
+    table.cell(dash,0,4,"Net Profit",text_color=color.white)
+    table.cell(dash,1,4,str.tostring(netP,"#,##0.##"))
+    table.cell(dash,0,5,"Equity",text_color=color.white)
+    table.cell(dash,1,5,str.tostring(eq,"#,##0.##"))
+
+// ====== INFO LABEL ======
+if barstate.islast
+    infoText = "RSI+VWAP+VOL IDX | RVOL>" + str.tostring(rvolThreshold) + " | FlowFast/Slow=" + str.tostring(flowFast) + "/" + str.tostring(flowSlow)
+    label.new(bar_index, high, infoText, style=label.style_label_left, color=color.new(color.black,80), textcolor=color.white, size=size.small)
